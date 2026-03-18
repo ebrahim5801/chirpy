@@ -24,16 +24,8 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 }
 
-type validate struct {
-	Body string `json:"body"`
-}
-
 type errorResponse struct {
 	Error string `json:"error"`
-}
-
-type validResponse struct {
-	CleanedBody string `json:"cleaned_body"`
 }
 
 type User struct {
@@ -67,8 +59,7 @@ func main() {
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		fmt.Errorf("connection error: %w", err)
-		return
+		log.Fatalf("connection error: %s", err)
 	}
 	dbQueries := database.New(db)
 
@@ -98,6 +89,22 @@ func main() {
 	server.ListenAndServe()
 }
 
+func respondWithJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	w.Write(data)
+}
+
+func respondWithError(w http.ResponseWriter, statusCode int, msg string) {
+	respondWithJSON(w, statusCode, errorResponse{Error: msg})
+}
+
 func appHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -124,106 +131,56 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, req *http.Request) {
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, req *http.Request) {
 	if os.Getenv("PLATFORM") != "dev" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
 	cfg.dbQueries.DeleteUsers(req.Context())
 	cfg.fileserverHits.Store(0)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 }
 
 func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
-	decoder := json.NewDecoder(req.Body)
-
-	data := &ChirpRequest{}
-
-	err := decoder.Decode(data)
+	data := ChirpRequest{}
+	err := json.NewDecoder(req.Body).Decode(&data)
 	if err != nil {
-		errData := &errorResponse{Error: "Something went wrong"}
-		dat, err := json.Marshal(errData)
-		if err != nil {
-			log.Printf("Error marshalling data: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
 		return
 	}
 
 	if len(data.Body) > 140 {
-		errData := &errorResponse{Error: "Chirp is too long"}
-		dat, err := json.Marshal(errData)
-		if err != nil {
-			log.Printf("Error marshalling data: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
-
 	}
 
-	chirpParam := &database.CreateChirpParams{
+	data.Body = replaceProfaneWords(data.Body)
+
+	chirpParam := database.CreateChirpParams{
 		Body:   data.Body,
 		UserID: data.UserID,
 	}
 
-	chirpData, err := cfg.dbQueries.CreateChirp(req.Context(), *chirpParam)
+	chirpData, err := cfg.dbQueries.CreateChirp(req.Context(), chirpParam)
 	if err != nil {
-		errData := &errorResponse{Error: "Error creating a chirp"}
-		dat, err := json.Marshal(errData)
-		if err != nil {
-			log.Printf("Error marshalling data: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Error creating a chirp")
 		return
 	}
 
-	chirp := &ChirpResponse{
+	respondWithJSON(w, http.StatusCreated, ChirpResponse{
 		ID:        chirpData.ID,
 		CreatedAt: chirpData.CreatedAt,
 		UpdatedAt: chirpData.UpdatedAt,
 		Body:      chirpData.Body,
 		UserID:    chirpData.UserID,
-	}
-
-	userResponse, err := json.Marshal(chirp)
-	if err != nil {
-		log.Printf("Error marshalling data: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
-	w.Write(userResponse)
+	})
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, req *http.Request) {
 	chirps, err := cfg.dbQueries.GetChirps(req.Context())
 	if err != nil {
-		errData := &errorResponse{Error: "Error fetching data"}
-		dat, err := json.Marshal(errData)
-		if err != nil {
-			log.Printf("Error marshalling data: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Error fetching data")
 		return
 	}
 
@@ -238,47 +195,29 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, req *http.Request)
 		}
 	}
 
-	response, err := json.Marshal(chirpResponses)
-	if err != nil {
-		log.Printf("Error marshalling data: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write(response)
+	respondWithJSON(w, http.StatusOK, chirpResponses)
 }
 
 func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, req *http.Request) {
 	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
 	if err != nil {
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	chirp, err := cfg.dbQueries.GetChirp(req.Context(), chirpID)
 	if err != nil {
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	response := ChirpResponse{
+	respondWithJSON(w, http.StatusOK, ChirpResponse{
 		ID:        chirp.ID,
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
 		Body:      chirp.Body,
 		UserID:    chirp.UserID,
-	}
-
-	dat, err := json.Marshal(response)
-	if err != nil {
-		log.Printf("Error marshalling data: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write(dat)
+	})
 }
 
 func replaceProfaneWords(text string) string {
@@ -291,9 +230,7 @@ func replaceProfaneWords(text string) string {
 	words := strings.Split(text, " ")
 
 	for i, word := range words {
-		lowerWord := strings.ToLower(word)
-
-		if profaneWords[lowerWord] {
+		if profaneWords[strings.ToLower(word)] {
 			words[i] = "****"
 		}
 	}
@@ -304,54 +241,23 @@ func replaceProfaneWords(text string) string {
 func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
-	decoder := json.NewDecoder(req.Body)
-
-	data := &userRequest{}
-
-	err := decoder.Decode(data)
+	data := userRequest{}
+	err := json.NewDecoder(req.Body).Decode(&data)
 	if err != nil {
-		errData := &errorResponse{Error: "Something went wrong"}
-		dat, err := json.Marshal(errData)
-		if err != nil {
-			log.Printf("Error marshalling data: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
 		return
-
 	}
 
 	userData, err := cfg.dbQueries.CreateUser(req.Context(), data.Email)
 	if err != nil {
-		errData := &errorResponse{Error: "Error creating a user"}
-		dat, err := json.Marshal(errData)
-		if err != nil {
-			log.Printf("Error marshalling data: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, http.StatusBadRequest, "Error creating a user")
 		return
 	}
-	user := &User{
+
+	respondWithJSON(w, http.StatusCreated, User{
 		ID:        userData.ID,
 		Email:     userData.Email,
 		CreatedAt: userData.CreatedAt,
 		UpdatedAt: userData.UpdatedAt,
-	}
-
-	userResponse, err := json.Marshal(user)
-	if err != nil {
-		log.Printf("Error marshalling data: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
-	w.Write(userResponse)
+	})
 }
