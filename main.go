@@ -24,6 +24,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	jwtToken       string
+	polkaKey       string
 }
 
 type errorResponse struct {
@@ -31,11 +32,12 @@ type errorResponse struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Password  string    `json:"password"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	Password    string    `json:"password"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type userRequest struct {
@@ -62,10 +64,20 @@ type loginResponse struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 
 type tokenResponse struct {
 	Token string `json:"token"`
+}
+
+type webhooksRequest struct {
+	Event string      `json:"event"`
+	Data  webhookData `json:"data"`
+}
+
+type webhookData struct {
+	UserID uuid.UUID `json:"user_id"`
 }
 
 func main() {
@@ -73,6 +85,7 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	jwtToken := os.Getenv("JWT_TOKEN")
+	polkaKey := os.Getenv("POLKA_KEY")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -80,7 +93,7 @@ func main() {
 	}
 	dbQueries := database.New(db)
 
-	apiCfg := &apiConfig{dbQueries: dbQueries, jwtToken: jwtToken}
+	apiCfg := &apiConfig{dbQueries: dbQueries, jwtToken: jwtToken, polkaKey: polkaKey}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", appHandler)
@@ -102,6 +115,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirpHandler)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpHandler)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.polkaWebhooksHandler)
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -300,10 +314,11 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Request
 	}
 
 	respondWithJSON(w, http.StatusCreated, User{
-		ID:        userData.ID,
-		Email:     userData.Email,
-		CreatedAt: userData.CreatedAt,
-		UpdatedAt: userData.UpdatedAt,
+		ID:          userData.ID,
+		Email:       userData.Email,
+		CreatedAt:   userData.CreatedAt,
+		UpdatedAt:   userData.UpdatedAt,
+		IsChirpyRed: userData.IsChirpyRed.Bool,
 	})
 }
 
@@ -363,6 +378,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) {
 		Email:        user.Email,
 		Token:        token,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  user.IsChirpyRed.Bool,
 	})
 }
 
@@ -490,6 +506,51 @@ func (cfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, req *http.Reques
 	err = cfg.dbQueries.DeleteChirp(req.Context(), chirpID)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Something went wrong")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) polkaWebhooksHandler(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+
+	apiKey, err := auth.GetAPIKey(req.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	if cfg.polkaKey != apiKey {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	data := webhooksRequest{}
+	err = json.NewDecoder(req.Body).Decode(&data)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
+		return
+	}
+
+	if data.Event != "user.upgraded" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	_, err = cfg.dbQueries.CheckUser(req.Context(), data.Data.UserID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	err = cfg.dbQueries.SubscribeUser(req.Context(), data.Data.UserID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
