@@ -95,11 +95,13 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/login", apiCfg.loginHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler)
+	mux.HandleFunc("PUT /api/users", apiCfg.updateUserHandler)
 	mux.HandleFunc("POST /api/refresh", apiCfg.refreshTokenHandler)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeTokenHandler)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirpHandler)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpHandler)
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -403,6 +405,91 @@ func (cfg *apiConfig) revokeTokenHandler(w http.ResponseWriter, req *http.Reques
 	err = cfg.dbQueries.RevokeRefreshToken(req.Context(), requestRefreshToken)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, req *http.Request) {
+	authToken, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	defer req.Body.Close()
+
+	data := userRequest{}
+	err = json.NewDecoder(req.Body).Decode(&data)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(authToken, cfg.jwtToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(data.Password)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
+		return
+	}
+
+	UserParam := database.UpdateUsersParams{
+		Email:    data.Email,
+		Password: hashedPassword,
+		ID:       userID,
+	}
+
+	err = cfg.dbQueries.UpdateUsers(req.Context(), UserParam)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error updating the user")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, User{
+		ID:    userID,
+		Email: data.Email,
+	})
+}
+
+func (cfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, req *http.Request) {
+	authToken, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(authToken, cfg.jwtToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirp(req.Context(), chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if userID != chirp.UserID {
+		respondWithError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	err = cfg.dbQueries.DeleteChirp(req.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
 		return
 	}
 

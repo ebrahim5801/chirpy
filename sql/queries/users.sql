@@ -14,3 +14,7 @@ DELETE FROM users;
 
 -- name: GetUser :one
 SELECT * FROM users WHERE email = $1;
+
+-- name: UpdateUsers :exec
+UPDATE users SET email = $1, password = $2 WHERE id = $3;
+
