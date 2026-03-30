@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -226,11 +227,40 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Reques
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, req *http.Request) {
-	chirps, err := cfg.dbQueries.GetChirps(req.Context())
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Error fetching data")
-		return
+	authorID := req.URL.Query().Get("author_id")
+	sortOrder := req.URL.Query().Get("sort")
+	if sortOrder == "" {
+		sortOrder = "asc"
 	}
+
+	var chirps []database.Chirp
+	var err error
+
+	if authorID != "" {
+		id, err := uuid.Parse(authorID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Error parsing uuid")
+			return
+		}
+		chirps, err = cfg.dbQueries.GetAuthorChirps(req.Context(), id)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Error fetching data")
+			return
+		}
+	} else {
+		chirps, err = cfg.dbQueries.GetChirps(req.Context())
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Error fetching data")
+			return
+		}
+	}
+
+	sort.Slice(chirps, func(i, j int) bool {
+		if sortOrder == "desc" {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		}
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	})
 
 	chirpResponses := make([]ChirpResponse, len(chirps))
 	for i, c := range chirps {
